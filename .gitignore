@@ -1,0 +1,9 @@
+# Build output
+/site-checker
+
+# Test artifacts
+*.test
+coverage.out
+
+# macOS metadata
+.DS_Store
