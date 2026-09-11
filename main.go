@@ -14,11 +14,8 @@ type CheckResult struct {
 	Err        error
 }
 
-func checkURL(url string) CheckResult {
+func checkURL(client *http.Client, url string) CheckResult {
 	start := time.Now()
-	client := http.Client{
-		Timeout: 5 * time.Second,
-	}
 	resp, err := client.Get(url)
 	if err != nil {
 		return CheckResult{
@@ -42,8 +39,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+	}
+
 	for _, url := range urls {
-		result := checkURL(url)
+		result := checkURL(client, url)
 		if result.Err != nil {
 			fmt.Printf("Error checking %s: %v in %v\n", result.URL, result.Err, result.Duration)
 		} else {
