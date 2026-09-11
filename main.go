@@ -1,7 +1,9 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
+	"os"
 	"time"
 )
 
@@ -30,5 +32,22 @@ func checkURL(url string) CheckResult {
 		URL:        url,
 		StatusCode: resp.StatusCode,
 		Duration:   time.Since(start),
+	}
+}
+
+func main() {
+	urls := os.Args[1:]
+	if len(urls) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: site-checker <url> [url...]")
+		os.Exit(1)
+	}
+
+	for _, url := range urls {
+		result := checkURL(url)
+		if result.Err != nil {
+			fmt.Printf("Error checking %s: %v in %v\n", result.URL, result.Err, result.Duration)
+		} else {
+			fmt.Printf("Checked %s: %d in %v\n", result.URL, result.StatusCode, result.Duration)
+		}
 	}
 }
