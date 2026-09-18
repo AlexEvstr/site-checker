@@ -2,14 +2,19 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/signal"
 	"sync"
 	"time"
 )
+
+var ErrInvalidWorkers = errors.New("workers must be greater than zero")
+var ErrInvalidTimeout = errors.New("timeout must be greater than zero")
 
 type job struct {
 	index int
@@ -26,6 +31,12 @@ type CheckResult struct {
 	StatusCode int
 	Duration   time.Duration
 	Err        error
+}
+
+func isHealthy(result CheckResult) bool {
+	return result.Err == nil &&
+		result.StatusCode >= http.StatusOK &&
+		result.StatusCode < http.StatusBadRequest
 }
 
 func worker(ctx context.Context, client *http.Client, jobs <-chan job, results chan<- indexedResult, wg *sync.WaitGroup) {
@@ -65,7 +76,16 @@ func checkURL(ctx context.Context, client *http.Client, url string) CheckResult 
 	}
 }
 
-func checkURLs(ctx context.Context, client *http.Client, urls []string, workers int) []CheckResult {
+func checkURLs(
+	ctx context.Context,
+	client *http.Client,
+	urls []string,
+	workers int,
+) ([]CheckResult, error) {
+	if err := validateWorkers(workers); err != nil {
+		return nil, err
+	}
+
 	jobs := make(chan job, len(urls))
 	results := make(chan indexedResult)
 	final := make([]CheckResult, len(urls))
@@ -90,46 +110,115 @@ func checkURLs(ctx context.Context, client *http.Client, urls []string, workers 
 		final[res.index] = res.result
 	}
 
-	return final
+	return final, nil
 }
 
 func validateWorkers(workers int) error {
 	if workers <= 0 {
-		return fmt.Errorf("number of workers must be greater than 0")
+		return ErrInvalidWorkers
 	}
 	return nil
 }
 
-func main() {
-	workers := flag.Int("workers", 3, "number of concurrent workers")
-	flag.Parse()
-	urls := flag.Args()
+func run(
+	ctx context.Context,
+	args []string,
+	client *http.Client,
+	output io.Writer,
+) (exitCode int, err error) {
+	flags := flag.NewFlagSet("site-checker", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+
+	workers := flags.Int("workers", 3, "number of concurrent workers")
+	timeout := flags.Duration(
+		"timeout",
+		5*time.Second,
+		"HTTP client timeout",
+	)
+	if err := flags.Parse(args); err != nil {
+		return 2, err
+	}
+
 	if err := validateWorkers(*workers); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		return 2, err
 	}
+
+	if *timeout <= 0 {
+		return 2, ErrInvalidTimeout
+	}
+
+	urls := flags.Args()
 	if len(urls) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: site-checker [-workers N] <url> [url...]")
-		os.Exit(1)
+		return 2, errors.New("at least one URL is required")
 	}
 
-	client := &http.Client{
-		Timeout: 5 * time.Second,
+	configuredClient := *client
+	configuredClient.Timeout = *timeout
+
+	results, err := checkURLs(ctx, &configuredClient, urls, *workers)
+	if err != nil {
+		return 2, err
 	}
 
+	healthy := 0
+
+	for _, result := range results {
+		if result.Err != nil {
+			fmt.Fprintf(
+				output,
+				"Error checking %s: %v in %v\n",
+				result.URL,
+				result.Err,
+				result.Duration,
+			)
+		} else {
+			if isHealthy(result) {
+				healthy++
+			}
+			fmt.Fprintf(
+				output,
+				"Checked %s: %d in %v\n",
+				result.URL,
+				result.StatusCode,
+				result.Duration,
+			)
+		}
+	}
+	failed := len(results) - healthy
+
+	fmt.Fprintf(
+		output,
+		"Checked: %d, healthy: %d, failed: %d\n",
+		len(results),
+		healthy,
+		failed,
+	)
+
+	if failed > 0 {
+		return 1, nil
+	}
+
+	return 0, nil
+}
+
+func main() {
 	ctx, stop := signal.NotifyContext(
 		context.Background(),
 		os.Interrupt,
 	)
-	defer stop()
 
-	results := checkURLs(ctx, client, urls, *workers)
+	client := &http.Client{}
 
-	for _, result := range results {
-		if result.Err != nil {
-			fmt.Printf("Error checking %s: %v in %v\n", result.URL, result.Err, result.Duration)
-		} else {
-			fmt.Printf("Checked %s: %d in %v\n", result.URL, result.StatusCode, result.Duration)
-		}
+	exitCode, err := run(
+		ctx,
+		os.Args[1:],
+		client,
+		os.Stdout,
+	)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
 	}
+
+	stop()
+	os.Exit(exitCode)
 }
